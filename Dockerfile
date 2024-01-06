@@ -1,6 +1,6 @@
 ARG GO_VERSION=1.21
 ARG IMAGE_TYPE=extras
-ARG BASE_IMAGE=ubuntu:22.04
+ARG BASE_IMAGE=buildpack-deps:bullseye-scm
 
 # extras or core
 FROM ${BASE_IMAGE} as requirements-core
@@ -100,8 +100,8 @@ RUN GRPC_BACKENDS=backend-assets/grpc/stablediffusion make build
 RUN if [ "${BUILD_GRPC}" = "true" ]; then \
     git clone --recurse-submodules -b v1.58.0 --depth 1 --shallow-submodules https://github.com/grpc/grpc && \
     cd grpc && mkdir -p cmake/build && cd cmake/build && cmake -DgRPC_INSTALL=ON \
-      -DgRPC_BUILD_TESTS=OFF \
-       ../.. && make -j12 install \
+    -DgRPC_BUILD_TESTS=OFF \
+    ../.. && make -j12 install \
     ; fi
 
 # Rebuild with defaults backends
@@ -161,43 +161,43 @@ COPY --from=builder /build/backend-assets/grpc/stablediffusion ./backend-assets/
 
 ## Duplicated from Makefile to avoid having a big layer that's hard to push
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/autogptq \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/autogptq \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/bark \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/bark \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/diffusers \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/diffusers \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/vllm \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/vllm \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/mamba \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/mamba \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/sentencetransformers \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/sentencetransformers \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/transformers \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/transformers \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/vall-e-x \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/vall-e-x \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/exllama \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/exllama \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
     PATH=$PATH:/opt/conda/bin make -C backend/python/exllama2 \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/petals \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/petals \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/transformers-musicgen \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/transformers-musicgen \
     ; fi
 RUN if [ "${IMAGE_TYPE}" = "extras" ]; then \
-	PATH=$PATH:/opt/conda/bin make -C backend/python/coqui \
+    PATH=$PATH:/opt/conda/bin make -C backend/python/coqui \
     ; fi
 
 # Make sure the models directory exists
@@ -205,7 +205,7 @@ RUN mkdir -p /build/models
 
 # Define the health check command
 HEALTHCHECK --interval=1m --timeout=10m --retries=10 \
-  CMD curl -f $HEALTHCHECK_ENDPOINT || exit 1
+    CMD curl -f $HEALTHCHECK_ENDPOINT || exit 1
 
 EXPOSE 8080
 ENTRYPOINT [ "/build/entrypoint.sh" ]

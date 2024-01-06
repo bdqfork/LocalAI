@@ -9,10 +9,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-skynet/LocalAI/pkg/downloader"
-	"github.com/go-skynet/LocalAI/pkg/utils"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
+
+	"github.com/go-skynet/LocalAI/pkg/downloader"
+	"github.com/go-skynet/LocalAI/pkg/utils"
 )
 
 type Config struct {
@@ -148,6 +149,13 @@ type Functions struct {
 	DisableNoAction         bool   `yaml:"disable_no_action"`
 	NoActionFunctionName    string `yaml:"no_action_function_name"`
 	NoActionDescriptionName string `yaml:"no_action_description_name"`
+
+	FunctionNameTag      string `yaml:"function_name_tag,omitempty"`
+	FunctionArgumentsTag string `yaml:"function_arguments_tag,omitempty"`
+
+	FunctionStartWord   string   `yaml:"function_start_word,omitempty"`
+	FunctionEndWord     string   `yaml:"function_end_word,omitempty"`
+	FunctionIgnoreWords []string `yaml:"function_ignore_words,omitempty"`
 }
 
 type TemplateConfig struct {
@@ -173,6 +181,10 @@ func (c *Config) SetFunctionCallNameString(s string) {
 
 func (c *Config) ShouldUseFunctions() bool {
 	return ((c.functionCallString != "none" || c.functionCallString == "") || c.ShouldCallSpecificFunction())
+}
+
+func (c *Config) MustUseFunctions() bool {
+	return c.functionCallString != "none" && c.ShouldCallSpecificFunction()
 }
 
 func (c *Config) ShouldCallSpecificFunction() bool {
