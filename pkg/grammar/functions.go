@@ -9,6 +9,7 @@ type Function struct {
 	Description string                 `json:"description"`
 	Parameters  map[string]interface{} `json:"parameters"`
 }
+
 type Functions []Function
 
 func (f Functions) ToJSONStructure() JSONFunctionStructure {

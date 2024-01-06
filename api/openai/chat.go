@@ -8,6 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+	"github.com/valyala/fasthttp"
+
 	"github.com/go-skynet/LocalAI/api/backend"
 	config "github.com/go-skynet/LocalAI/api/config"
 	"github.com/go-skynet/LocalAI/api/options"
@@ -15,18 +20,25 @@ import (
 	"github.com/go-skynet/LocalAI/pkg/grammar"
 	model "github.com/go-skynet/LocalAI/pkg/model"
 	"github.com/go-skynet/LocalAI/pkg/utils"
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
-	"github.com/valyala/fasthttp"
 )
+
+type FunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Function  string `json:"function,omitempty"`
+	Arguments any    `json:"arguments,omitempty"`
+}
 
 func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx) error {
 	emptyMessage := ""
 	id := uuid.New().String()
 	created := int(time.Now().Unix())
 
+	isFunctionCalling := false
+
 	process := func(s string, req *schema.OpenAIRequest, config *config.Config, loader *model.ModelLoader, responses chan schema.OpenAIResponse) {
+		fNameTag := config.FunctionsConfig.FunctionNameTag
+		fArgsTag := config.FunctionsConfig.FunctionArgumentsTag
+
 		initialMessage := schema.OpenAIResponse{
 			ID:      id,
 			Created: created,
@@ -36,12 +48,87 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 		}
 		responses <- initialMessage
 
+		buffer := ""
+
+		isFName := false
+		isFArgs := false
+		isFirstNotEmptyTokenSent := false
+
 		ComputeChoices(req, s, config, o, loader, func(s string, c *[]schema.Choice) {}, func(s string, usage backend.TokenUsage) bool {
+			if !isFirstNotEmptyTokenSent {
+				if strings.TrimSpace(s) == "" {
+					return true
+				}
+				isFirstNotEmptyTokenSent = true
+			}
+			buffer += s
+			log.Debug().Msgf("Got output: %+v, buffer: %+v", s, buffer)
+
+			if isFName && !strings.HasPrefix(fNameTag, buffer) {
+				resp := schema.OpenAIResponse{
+					ID:      id,
+					Created: created,
+					Model:   req.Model, // we have to return what the user sent here, due to OpenAI spec.
+					Choices: []schema.Choice{{Delta: &schema.Message{FunctionCall: &FunctionCall{
+						Name: buffer,
+					}}, Index: 0}},
+					Object: "chat.completion.chunk",
+					Usage: schema.OpenAIUsage{
+						PromptTokens:     usage.Prompt,
+						CompletionTokens: usage.Completion,
+						TotalTokens:      usage.Prompt + usage.Completion,
+					},
+				}
+				responses <- resp
+				buffer = ""
+				return true
+			}
+
+			if isFArgs && !strings.HasPrefix(fArgsTag, buffer) {
+				resp := schema.OpenAIResponse{
+					ID:      id,
+					Created: created,
+					Model:   req.Model, // we have to return what the user sent here, due to OpenAI spec.
+					Choices: []schema.Choice{{Delta: &schema.Message{FunctionCall: &FunctionCall{
+						Arguments: buffer,
+					}}, Index: 0}},
+					Object: "chat.completion.chunk",
+					Usage: schema.OpenAIUsage{
+						PromptTokens:     usage.Prompt,
+						CompletionTokens: usage.Completion,
+						TotalTokens:      usage.Prompt + usage.Completion,
+					},
+				}
+				responses <- resp
+				buffer = ""
+				return true
+			}
+
+			if len(fNameTag) != 0 && strings.HasPrefix(fNameTag, buffer) {
+				log.Debug().Msgf("Match FunctionNameTag prefix: %+v, buffer: %v", fNameTag, buffer)
+				if fNameTag == buffer {
+					isFName = !isFName
+					buffer = ""
+					isFunctionCalling = true
+				}
+				return true
+			}
+
+			if len(fArgsTag) != 0 && strings.HasPrefix(fArgsTag, buffer) {
+				log.Debug().Msgf("Match FunctionArgumentsTag prefix: %+v, buffer: %v", fArgsTag, buffer)
+				if fArgsTag == buffer {
+					isFArgs = !isFArgs
+					buffer = ""
+					isFunctionCalling = true
+				}
+				return true
+			}
+
 			resp := schema.OpenAIResponse{
 				ID:      id,
 				Created: created,
 				Model:   req.Model, // we have to return what the user sent here, due to OpenAI spec.
-				Choices: []schema.Choice{{Delta: &schema.Message{Content: &s}, Index: 0}},
+				Choices: []schema.Choice{{Delta: &schema.Message{Content: buffer}, Index: 0}},
 				Object:  "chat.completion.chunk",
 				Usage: schema.OpenAIUsage{
 					PromptTokens:     usage.Prompt,
@@ -51,6 +138,9 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 			}
 
 			responses <- resp
+
+			buffer = ""
+
 			return true
 		})
 		close(responses)
@@ -62,6 +152,7 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 		if err != nil {
 			return fmt.Errorf("failed reading parameters from request:%w", err)
 		}
+		log.Debug().Msgf("Request intput: %+v", input)
 
 		config, input, err := readConfig(modelFile, input, cm, o.Loader, o.Debug, o.Threads, o.ContextSize, o.F16)
 		if err != nil {
@@ -91,38 +182,40 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 
 			processFunctions = true
 
-			noActionGrammar := grammar.Function{
-				Name:        noActionName,
-				Description: noActionDescription,
-				Parameters: map[string]interface{}{
-					"properties": map[string]interface{}{
-						"message": map[string]interface{}{
-							"type":        "string",
-							"description": "The message to reply the user with",
-						}},
-				},
-			}
-
 			// Append the no action function
 			funcs = append(funcs, input.Functions...)
-			if !config.FunctionsConfig.DisableNoAction {
+
+			if config.MustUseFunctions() || !config.FunctionsConfig.DisableNoAction {
+				noActionGrammar := grammar.Function{
+					Name:        noActionName,
+					Description: noActionDescription,
+					Parameters: map[string]interface{}{
+						"properties": map[string]interface{}{
+							"message": map[string]interface{}{
+								"type":        "string",
+								"description": "The message to reply the user with",
+							}},
+					},
+				}
+
 				funcs = append(funcs, noActionGrammar)
-			}
 
-			// Force picking one of the functions by the request
-			if config.FunctionToCall() != "" {
-				funcs = funcs.Select(config.FunctionToCall())
-			}
+				// Force picking one of the functions by the request
+				if config.FunctionToCall() != "" {
+					funcs = funcs.Select(config.FunctionToCall())
+				}
 
-			// Update input grammar
-			jsStruct := funcs.ToJSONStructure()
-			config.Grammar = jsStruct.Grammar("")
+				// Update input grammar
+				jsStruct := funcs.ToJSONStructure()
+				config.Grammar = jsStruct.Grammar("")
+			}
 		} else if input.JSONFunctionGrammarObject != nil {
 			config.Grammar = input.JSONFunctionGrammarObject.Grammar("")
 		}
 
 		// functions are not supported in stream mode (yet?)
-		toStream := input.Stream && !processFunctions
+		toStream := input.Stream
+		// toStream := input.Stream && !processFunctions
 
 		log.Debug().Msgf("Parameters: %+v", config)
 
@@ -278,13 +371,19 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 					w.Flush()
 				}
 
+				finishReason := "stop"
+
+				if isFunctionCalling {
+					finishReason = "function_call"
+				}
+
 				resp := &schema.OpenAIResponse{
 					ID:      id,
 					Created: created,
 					Model:   input.Model, // we have to return what the user sent here, due to OpenAI spec.
 					Choices: []schema.Choice{
 						{
-							FinishReason: "stop",
+							FinishReason: finishReason,
 							Index:        0,
 							Delta:        &schema.Message{Content: &emptyMessage},
 						}},
@@ -301,79 +400,24 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 		}
 
 		result, tokenUsage, err := ComputeChoices(input, predInput, config, o, o.Loader, func(s string, c *[]schema.Choice) {
-			if processFunctions {
-				// As we have to change the result before processing, we can't stream the answer (yet?)
-				ss := map[string]interface{}{}
-				// This prevent newlines to break JSON parsing for clients
-				s = utils.EscapeNewLines(s)
-				json.Unmarshal([]byte(s), &ss)
-				log.Debug().Msgf("Function return: %s %+v", s, ss)
+			log.Debug().Msgf("Got output: %+v", s)
 
-				// The grammar defines the function name as "function", while OpenAI returns "name"
-				func_name := ss["function"]
-				// Similarly, while here arguments is a map[string]interface{}, OpenAI actually want a stringified object
-				args := ss["arguments"] // arguments needs to be a string, but we return an object from the grammar result (TODO: fix)
-				d, _ := json.Marshal(args)
+			// This prevent newlines to break JSON parsing for clients
+			s = utils.EscapeNewLines(s)
 
-				ss["arguments"] = string(d)
-				ss["name"] = func_name
+			// As we have to change the result before processing, we can't stream the answer (yet?)
+			ss := parseFunctionCall(s, config.FunctionsConfig.FunctionNameTag, config.FunctionsConfig.FunctionArgumentsTag)
 
-				// if do nothing, reply with a message
-				if func_name == noActionName {
-					log.Debug().Msgf("nothing to do, computing a reply")
-
-					// If there is a message that the LLM already sends as part of the JSON reply, use it
-					arguments := map[string]interface{}{}
-					json.Unmarshal([]byte(d), &arguments)
-					m, exists := arguments["message"]
-					if exists {
-						switch message := m.(type) {
-						case string:
-							if message != "" {
-								log.Debug().Msgf("Reply received from LLM: %s", message)
-								message = backend.Finetune(*config, predInput, message)
-								log.Debug().Msgf("Reply received from LLM(finetuned): %s", message)
-
-								*c = append(*c, schema.Choice{Message: &schema.Message{Role: "assistant", Content: &message}})
-								return
-							}
-						}
-					}
-
-					log.Debug().Msgf("No action received from LLM, without a message, computing a reply")
-					// Otherwise ask the LLM to understand the JSON output and the context, and return a message
-					// Note: This costs (in term of CPU) another computation
-					config.Grammar = ""
-					images := []string{}
-					for _, m := range input.Messages {
-						images = append(images, m.StringImages...)
-					}
-					predFunc, err := backend.ModelInference(input.Context, predInput, images, o.Loader, *config, o, nil)
-					if err != nil {
-						log.Error().Msgf("inference error: %s", err.Error())
-						return
-					}
-
-					prediction, err := predFunc()
-					if err != nil {
-						log.Error().Msgf("inference error: %s", err.Error())
-						return
-					}
-
-					fineTunedResponse := backend.Finetune(*config, predInput, prediction.Response)
-					*c = append(*c, schema.Choice{Message: &schema.Message{Role: "assistant", Content: &fineTunedResponse}})
-				} else {
-					// otherwise reply with the function call
-					*c = append(*c, schema.Choice{
-						FinishReason: "function_call",
-						Message:      &schema.Message{Role: "assistant", FunctionCall: ss},
-					})
-				}
-
+			if ss != nil {
+				*c = append(*c, schema.Choice{
+					FinishReason: "function_call",
+					Message:      &schema.Message{Role: "assistant", FunctionCall: ss},
+				})
 				return
 			}
 			*c = append(*c, schema.Choice{FinishReason: "stop", Index: 0, Message: &schema.Message{Role: "assistant", Content: &s}})
 		}, nil)
+
 		if err != nil {
 			return err
 		}
@@ -395,5 +439,40 @@ func ChatEndpoint(cm *config.ConfigLoader, o *options.Option) func(c *fiber.Ctx)
 
 		// Return the prediction in the response body
 		return c.JSON(resp)
+	}
+}
+
+func parseFunctionCall(str, fNameTag, fArgsTag string) *FunctionCall {
+	if fNameTag == "" || fArgsTag == "" {
+		return nil
+	}
+
+	fName := ""
+	fArgs := ""
+
+	startIndex := strings.Index(str, fNameTag)
+	endIndex := strings.LastIndex(str, fNameTag)
+
+	if startIndex != -1 && endIndex != -1 && startIndex != endIndex {
+		startIndex += len(fNameTag)
+		fName = str[startIndex:endIndex]
+	}
+
+	startIndex = strings.Index(str, fArgsTag)
+	endIndex = strings.LastIndex(str, fArgsTag)
+
+	if startIndex != -1 && endIndex != -1 && startIndex != endIndex {
+		startIndex += len(fArgsTag)
+		fArgs = str[startIndex:endIndex]
+	}
+
+	fName = strings.TrimSpace(fName)
+	fArgs = strings.TrimSpace(fArgs)
+	if fName == "" && fArgs == "" {
+		return nil
+	}
+	return &FunctionCall{
+		Name:      fName,
+		Arguments: fArgs,
 	}
 }

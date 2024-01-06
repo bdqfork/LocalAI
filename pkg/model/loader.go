@@ -3,6 +3,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,10 +11,11 @@ import (
 	"sync"
 	"text/template"
 
-	grammar "github.com/go-skynet/LocalAI/pkg/grammar"
-	"github.com/go-skynet/LocalAI/pkg/grpc"
 	process "github.com/mudler/go-processmanager"
 	"github.com/rs/zerolog/log"
+
+	grammar "github.com/go-skynet/LocalAI/pkg/grammar"
+	"github.com/go-skynet/LocalAI/pkg/grpc"
 )
 
 // Rather than pass an interface{} to the prompt template:
@@ -260,7 +262,15 @@ func (ml *ModelLoader) loadTemplateIfExists(templateType TemplateType, templateN
 	}
 
 	// Parse the template
-	tmpl, err := template.New("prompt").Parse(dat)
+	tmpl, err := template.New("prompt").Funcs(template.FuncMap{
+		"json": func(input any) (string, error) {
+			data, err := json.Marshal(input)
+			if err != nil {
+				return "", err
+			}
+			return string(data), nil
+		},
+	}).Parse(dat)
 	if err != nil {
 		return err
 	}
